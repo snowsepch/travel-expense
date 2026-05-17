@@ -878,7 +878,7 @@ function openTripEditor(trip){
       Object.assign(trip,data);
     }
     save('te_trips',state.trips);
-    closeSheet(); toast(isNew?'旅程已建立','ok'); renderAll();
+    closeSheet(); toast(isNew?'旅程已建立':'已儲存','ok'); renderAll();
   };
   if(!isNew){
     $('#tDel').onclick=()=>{
