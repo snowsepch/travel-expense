@@ -1,0 +1,1242 @@
+<!DOCTYPE html>
+<!--
+  旅行記帳 — 拍發票記帳工具  V1.0
+  ─────────────────────────────────────────────────────────────
+  個人旅遊支出記帳（與 Duho Select 選品工具分開）
+  流程：拍發票 → AI 辨識金額/日期/商家/幣別（可手動）→ 存入分趟旅程帳本
+
+  風格：方案 A 收據印刷風（Lala 2026-05-17 選定）
+  · 純白底 #FFFFFE + 磚紅 #C4341A + 薄荷綠 #3D9580（最多 3 色，禁漸層禁陰影）
+  · Bebas Neue 只用於數字/金額/日期；Noto Sans TC 900 用於中文標題
+  · dot-leader 點線、棋盤格邊條、2px 線框、震撼態字級
+
+  技術（比照 Duho Select）
+  · 單檔 HTML，無外部框架
+  · 文字資料存 localStorage（te_*）；收據照片存 IndexedDB（不限筆數，可存上千張）
+  · AI 辨識：Anthropic Messages API，瀏覽器端直接呼叫，模型 claude-haiku-4-5-20251001
+  · 即時匯率：open.er-api.com 主來源 + fawazahmed0 CDN 備援，超出合理區間剔除
+  · 匯出：CSV（UTF-8 BOM + 中文欄位）、Excel .xlsx（純前端 CRC32+ZIP+OOXML）
+-->
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>旅行記帳</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#FFFFFE; --ink:#211C17; --line:#211C17; --soft:#B8A584;
+    --a1:#C4341A; --a2:#3D9580; --page:#EAE4D4;
+    --col:440px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    font-family:"Noto Sans TC",sans-serif;background:var(--page);color:var(--ink);
+    -webkit-font-smoothing:antialiased;line-height:1.5;overflow-x:hidden;
+  }
+  button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+  input,select,textarea{font-family:inherit;color:inherit}
+  .num{font-family:"Bebas Neue",sans-serif;font-weight:400;letter-spacing:.02em}
+
+  #app{
+    max-width:var(--col);margin:0 auto;min-height:100vh;
+    background:var(--bg);position:relative;
+    border-left:2px solid var(--line);border-right:2px solid var(--line);
+  }
+
+  /* ───── 頂欄 ───── */
+  #topbar{
+    position:sticky;top:0;z-index:30;background:var(--bg);
+    border-bottom:2px solid var(--line);
+  }
+  .tb-main{display:flex;align-items:center;gap:10px;padding:11px 16px}
+  .tb-trip{
+    display:flex;align-items:center;gap:7px;
+    border:2px solid var(--line);border-radius:9px;padding:6px 11px;
+    font-size:16px;font-weight:900;letter-spacing:.02em;max-width:100%;
+  }
+  .tb-trip .tt-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tb-trip svg{width:15px;height:15px;flex:none}
+  .tb-logo{
+    margin-left:auto;font-size:13px;font-weight:900;letter-spacing:.04em;
+    color:var(--a1);display:flex;align-items:center;gap:6px;
+  }
+  .tb-logo i{
+    width:24px;height:24px;border:2px solid var(--a1);border-radius:6px;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .tb-logo i svg{width:14px;height:14px}
+  .checker{
+    height:8px;
+    background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='5' height='5' fill='%23211C17'/%3E%3Crect x='5' y='5' width='5' height='5' fill='%23211C17'/%3E%3C/svg%3E");
+  }
+
+  /* ───── 頁面 ───── */
+  main{padding:18px 16px calc(96px + env(safe-area-inset-bottom))}
+  .page{display:none}
+  .page.show{display:block}
+  .sec-title{
+    font-size:12px;font-weight:900;letter-spacing:.14em;color:var(--soft);
+    filter:brightness(.72);margin:0 0 10px 2px;
+  }
+  .sec+.sec{margin-top:24px}
+
+  /* ───── 匯率列 ───── */
+  .rate{
+    display:flex;align-items:center;gap:10px;
+    border:2px solid var(--line);border-radius:10px;padding:10px 13px;
+  }
+  .jpflag{
+    font-family:"Bebas Neue",sans-serif;font-size:17px;letter-spacing:.08em;
+    border:2px solid var(--line);border-radius:4px;padding:1px 8px 0;flex:none;
+  }
+  .rate .r-name{font-size:15px;font-weight:900}
+  .rate .r-val{margin-left:auto;font-size:14px;text-align:right}
+  .rate .r-val .num{font-size:19px;color:var(--a1)}
+  .rate .r-val small{display:block;font-size:10px;color:var(--soft);filter:brightness(.7);font-weight:700}
+  .rate .r-ref{
+    width:34px;height:34px;flex:none;border:2px solid var(--line);border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .rate .r-ref svg{width:17px;height:17px}
+  .rate .r-ref.spin svg{animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ───── 大相機鈕 ───── */
+  .camzone{
+    margin-top:16px;border:2px solid var(--a1);border-radius:16px;
+    padding:30px 18px 26px;text-align:center;width:100%;
+    display:flex;flex-direction:column;align-items:center;gap:7px;color:var(--ink);
+  }
+  .camzone:active{background:#FBF1EF}
+  .cam-ic{
+    width:70px;height:70px;border:2px solid var(--a1);border-radius:50%;
+    display:flex;align-items:center;justify-content:center;color:var(--a1);margin-bottom:4px;
+  }
+  .cam-ic svg{width:36px;height:36px}
+  .cam-t{font-size:23px;font-weight:900;letter-spacing:.04em}
+  .cam-s{font-size:13px;color:var(--soft);filter:brightness(.72)}
+
+  /* ───── 按鈕 ───── */
+  .btn{
+    width:100%;font-size:16px;font-weight:700;border-radius:9px;
+    padding:13px 14px;display:flex;align-items:center;justify-content:center;gap:8px;
+    border:2px solid var(--line);background:var(--bg);color:var(--ink);
+  }
+  .btn svg{width:18px;height:18px}
+  .btn--solid{background:var(--a1);border-color:var(--a1);color:#fff}
+  .btn--mint{background:var(--a2);border-color:var(--a2);color:#fff}
+  .btn:active{opacity:.82}
+  .btn[disabled]{opacity:.4}
+  .btn-row{display:flex;gap:10px;margin-top:12px}
+  .ai-hint{
+    margin-top:11px;font-size:12.5px;color:var(--soft);filter:brightness(.72);
+    text-align:center;line-height:1.6;
+  }
+  .ai-hint .num{font-size:14px;color:var(--a1);filter:none}
+
+  /* ───── 今日列 ───── */
+  .today-h{
+    margin:24px 0 10px 2px;font-size:13px;font-weight:900;letter-spacing:.04em;
+    display:flex;align-items:center;gap:7px;
+  }
+  .today-h .num{font-size:16px}
+
+  /* ───── 摘要卡 ───── */
+  .summary{border:2px solid var(--line);border-radius:14px;padding:16px 16px 14px}
+  .sum-lab{font-size:12px;font-weight:900;letter-spacing:.12em;color:var(--soft);filter:brightness(.72)}
+  .sum-big{
+    font-family:"Bebas Neue",sans-serif;font-size:62px;line-height:.95;
+    letter-spacing:.02em;color:var(--a1);margin:3px 0 2px;
+  }
+  .sum-sub{font-size:13.5px;color:var(--soft);filter:brightness(.7)}
+  .sum-sub .num{font-size:16px;color:var(--ink);filter:none}
+  .budget{margin-top:13px}
+  .bud-row{display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:6px;font-weight:700}
+  .bud-row .num{font-size:14px}
+  .bud-row .over{color:var(--a1)}
+  .bar{height:11px;border:2px solid var(--line);border-radius:999px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--a2)}
+  .bar i.over{background:var(--a1)}
+  .sum-stats{display:flex;margin-top:14px;border-top:2px solid var(--line)}
+  .stat{flex:1;padding-top:11px;text-align:center}
+  .stat+.stat{border-left:2px solid var(--line)}
+  .stat .num{font-size:26px;line-height:1;display:block}
+  .stat small{font-size:11px;color:var(--soft);filter:brightness(.72);font-weight:700}
+
+  /* ───── 篩選 ───── */
+  .filter{display:flex;gap:7px;overflow-x:auto;margin:18px -16px 14px;padding:0 16px 3px;scrollbar-width:none}
+  .filter::-webkit-scrollbar{display:none}
+  .chip{
+    flex:none;font-size:13px;font-weight:700;border:2px solid var(--line);
+    border-radius:999px;padding:6px 13px;background:var(--bg);color:var(--ink);white-space:nowrap;
+  }
+  .chip.on{background:var(--a1);border-color:var(--a1);color:#fff}
+
+  /* ───── 列表 ───── */
+  .list{display:flex;flex-direction:column;gap:11px}
+  .entry{display:flex;align-items:center;gap:12px;border:2px solid var(--line);border-radius:10px;padding:10px 12px}
+  .entry:active{background:#FAF6EE}
+  .e-thumb{
+    width:52px;height:52px;flex:none;border:2px solid var(--line);border-radius:7px;
+    background-color:#F0EAD9;background-size:cover;background-position:center;
+    display:flex;align-items:center;justify-content:center;color:var(--soft);overflow:hidden;
+  }
+  .e-thumb svg{width:20px;height:20px}
+  .e-info{min-width:0;display:flex;flex-direction:column;gap:3px}
+  .e-name{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .e-meta{font-size:11.5px;color:var(--soft);filter:brightness(.7);display:flex;align-items:center;gap:6px}
+  .leader{flex:1;border-bottom:2px dotted var(--soft);align-self:flex-end;margin-bottom:8px;min-width:14px}
+  .e-price{text-align:right;flex:none}
+  .e-price .yen{font-family:"Bebas Neue",sans-serif;font-size:24px;line-height:1;display:block}
+  .e-price .ntd{font-size:11px;color:var(--soft);filter:brightness(.7)}
+  .tag{font-size:10.5px;font-weight:700;border:2px solid var(--soft);border-radius:4px;padding:1px 6px}
+
+  /* ───── 空狀態 ───── */
+  .empty{text-align:center;padding:42px 24px;color:var(--soft);filter:brightness(.82)}
+  .empty .stamp{
+    width:104px;height:104px;margin:0 auto 18px;border:2.5px solid var(--soft);border-radius:50%;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    color:var(--soft);transform:rotate(-11deg);position:relative;
+  }
+  .empty .stamp::before{content:"";position:absolute;width:86px;height:86px;border:1.5px solid var(--soft);border-radius:50%}
+  .empty .stamp svg{width:34px;height:34px}
+  .empty .stamp b{font-size:10px;font-weight:900;letter-spacing:.16em;margin-top:4px}
+  .empty p{font-size:14.5px;line-height:1.7}
+  .empty .btn{margin-top:18px;max-width:260px;margin-left:auto;margin-right:auto}
+
+  /* ───── 設定 ───── */
+  .card{border:2px solid var(--line);border-radius:12px;padding:14px 15px}
+  .card+.card{margin-top:11px}
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field+.field{margin-top:13px}
+  .f-label{font-size:12px;font-weight:900;letter-spacing:.06em;color:var(--soft);filter:brightness(.72)}
+  .input,.select{
+    border:2px solid var(--line);border-radius:8px;padding:10px 12px;
+    font-size:15.5px;font-weight:700;background:var(--bg);width:100%;
+  }
+  textarea.input{resize:none;font-weight:500}
+  .row2{display:flex;gap:10px}
+  .row2>*{flex:1}
+  .hint{font-size:12px;color:var(--soft);filter:brightness(.72);line-height:1.65;margin-top:8px}
+  .trip-item{
+    display:flex;align-items:center;gap:10px;border:2px solid var(--line);
+    border-radius:10px;padding:11px 12px;
+  }
+  .trip-item+.trip-item{margin-top:9px}
+  .trip-item.cur{border-color:var(--a1)}
+  .ti-info{min-width:0;flex:1}
+  .ti-name{font-size:15px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ti-meta{font-size:11.5px;color:var(--soft);filter:brightness(.7)}
+  .ti-cur{font-size:10px;font-weight:900;letter-spacing:.1em;color:var(--a1);border:2px solid var(--a1);border-radius:4px;padding:1px 6px;flex:none}
+  .ti-edit{width:34px;height:34px;flex:none;border:2px solid var(--line);border-radius:8px;display:flex;align-items:center;justify-content:center}
+  .ti-edit svg{width:16px;height:16px}
+  .about{font-size:13px;line-height:1.85;color:#4A4234}
+  .about b{color:var(--ink)}
+  .ver{font-family:"Bebas Neue",sans-serif;font-size:15px;letter-spacing:.06em}
+
+  /* ───── 底部導航 ───── */
+  #botnav{
+    position:fixed;left:50%;transform:translateX(-50%);bottom:0;
+    width:min(var(--col),100%);background:var(--bg);
+    border-top:2px solid var(--line);display:flex;z-index:30;
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  .nav-i{
+    flex:1;padding:9px 4px 8px;display:flex;flex-direction:column;align-items:center;gap:3px;
+    color:var(--soft);font-size:11px;font-weight:700;
+  }
+  .nav-i svg{width:23px;height:23px}
+  .nav-i.on{color:var(--a1)}
+
+  /* ───── 抽屜 / 彈窗 ───── */
+  .scrim{
+    position:fixed;inset:0;background:rgba(33,28,23,.5);z-index:40;
+    display:none;align-items:flex-end;justify-content:center;
+  }
+  .scrim.show{display:flex}
+  .sheet{
+    width:min(var(--col),100%);background:var(--bg);
+    border:2px solid var(--line);border-bottom:none;border-radius:18px 18px 0 0;
+    max-height:92vh;overflow-y:auto;
+    padding-bottom:calc(18px + env(safe-area-inset-bottom));
+  }
+  .sheet-hd{
+    position:sticky;top:0;background:var(--bg);z-index:2;
+    display:flex;align-items:center;gap:10px;padding:15px 16px 13px;
+    border-bottom:2px solid var(--line);
+  }
+  .sheet-hd h2{font-size:18px;font-weight:900;letter-spacing:.03em}
+  .sheet-x{
+    margin-left:auto;width:34px;height:34px;border:2px solid var(--line);border-radius:8px;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .sheet-x svg{width:16px;height:16px}
+  .sheet-bd{padding:16px}
+
+  /* 表單照片 */
+  .photo-box{
+    border:2px solid var(--line);border-radius:10px;overflow:hidden;
+    position:relative;background:#F0EAD9;
+  }
+  .photo-box img{display:block;width:100%;max-height:230px;object-fit:cover}
+  .photo-box .ph-empty{
+    height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:6px;color:var(--soft);
+  }
+  .photo-box .ph-empty svg{width:28px;height:28px}
+  .photo-box .ph-empty span{font-size:12.5px;font-weight:700}
+  .ph-retake{
+    position:absolute;right:9px;bottom:9px;font-size:11.5px;font-weight:700;
+    background:var(--bg);border:2px solid var(--line);border-radius:6px;padding:4px 9px;
+  }
+  /* 表單金額 */
+  .amt-wrap{display:flex;gap:9px}
+  .amt-wrap .input{flex:1;font-family:"Bebas Neue",sans-serif;font-size:28px}
+  .amt-wrap .select{width:104px;flex:none}
+  .conv{
+    margin-top:7px;font-size:13px;color:var(--soft);filter:brightness(.72);font-weight:700;
+  }
+  .conv .num{font-size:19px;color:var(--a2);filter:none}
+  .chips-pick{display:flex;flex-wrap:wrap;gap:7px}
+  .cpk{
+    font-size:13px;font-weight:700;border:2px solid var(--line);border-radius:999px;
+    padding:6px 13px;background:var(--bg);
+  }
+  .cpk.on{background:var(--a1);border-color:var(--a1);color:#fff}
+
+  /* loading */
+  .loading{
+    position:fixed;inset:0;z-index:60;background:rgba(255,255,254,.92);
+    display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+  }
+  .loading.show{display:flex}
+  .spinner{width:46px;height:46px;border:4px solid var(--soft);border-top-color:var(--a1);border-radius:50%;animation:spin .7s linear infinite}
+  .loading p{font-size:15px;font-weight:900;letter-spacing:.04em}
+  .loading small{font-size:12px;color:var(--soft);filter:brightness(.7)}
+
+  /* lightbox */
+  .lightbox{
+    position:fixed;inset:0;z-index:70;background:rgba(33,28,23,.92);
+    display:none;align-items:center;justify-content:center;padding:20px;
+  }
+  .lightbox.show{display:flex}
+  .lightbox img{max-width:100%;max-height:100%;border:2px solid #fff;border-radius:6px}
+
+  /* toast */
+  #toast{
+    position:fixed;left:50%;transform:translateX(-50%) translateY(20px);
+    bottom:calc(96px + env(safe-area-inset-bottom));z-index:80;
+    background:var(--ink);color:#fff;font-size:14px;font-weight:700;
+    padding:11px 20px;border-radius:999px;opacity:0;transition:.25s;pointer-events:none;
+    max-width:88%;text-align:center;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.ok{background:var(--a2)}
+  #toast.err{background:var(--a1)}
+
+  /* confirm */
+  .confirm-box{
+    width:min(340px,90%);background:var(--bg);border:2px solid var(--line);border-radius:14px;
+    align-self:center;margin:auto;padding:20px 18px 16px;
+  }
+  .confirm-box h3{font-size:17px;font-weight:900;margin-bottom:8px}
+  .confirm-box p{font-size:14px;color:#4A4234;line-height:1.6;margin-bottom:16px}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header id="topbar">
+    <div class="tb-main">
+      <button class="tb-trip" id="tripBtn">
+        <span class="tt-name" id="tripName">旅行記帳</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <span class="tb-logo">
+        <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5A2 2 0 0 1 5 6.5h2L8.4 4.5h7.2L17 6.5h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.6" r="3.5"/></svg></i>
+        旅行記帳
+      </span>
+    </div>
+    <div class="checker"></div>
+  </header>
+
+  <main>
+    <section class="page" id="page-capture"></section>
+    <section class="page" id="page-ledger"></section>
+    <section class="page" id="page-settings"></section>
+  </main>
+
+  <nav id="botnav">
+    <button class="nav-i" data-page="capture">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5A2 2 0 0 1 5 6.5h2L8.4 4.5h7.2L17 6.5h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.6" r="3.5"/></svg>
+      <span>拍發票</span>
+    </button>
+    <button class="nav-i" data-page="ledger">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3.5h11l3 3v14H5z"/><path d="M8.5 9h7M8.5 13h7M8.5 17h4"/></svg>
+      <span>帳本</span>
+    </button>
+    <button class="nav-i" data-page="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.6v3M12 18.4v3M4.3 4.3l2.1 2.1M17.6 17.6l2.1 2.1M2.6 12h3M18.4 12h3M4.3 19.7l2.1-2.1M17.6 6.4l2.1-2.1"/></svg>
+      <span>設定</span>
+    </button>
+  </nav>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="loading" id="loading">
+  <div class="spinner"></div>
+  <p>AI 辨識中…</p>
+  <small>正在讀取發票上的金額與日期</small>
+</div>
+<div class="lightbox" id="lightbox"><img id="lightboxImg" alt="發票照片"></div>
+<div id="toast"></div>
+
+<input type="file" id="fileCamera" accept="image/*" capture="environment" hidden>
+<input type="file" id="fileAlbum" accept="image/*" hidden>
+
+<script>
+"use strict";
+/* ═══════════ 常數 ═══════════ */
+const CATS = ['機票','住宿','餐飲','交通','購物','景點','其他'];
+const CUR = {
+  JPY:{sym:'¥', name:'日圓', key:'JPY'},
+  KRW:{sym:'₩', name:'韓元', key:'KRW'},
+  TWD:{sym:'NT$', name:'台幣', key:'TWD'},
+};
+const DEFAULT_RATE = {JPY:0.199, KRW:0.0211};
+const RATE_RANGE = {JPY:[0.15,0.30], KRW:[0.015,0.035]};
+const AI_MODEL = 'claude-haiku-4-5-20251001';
+const VERSION = 'V1.0';
+
+/* ═══════════ 圖示 ═══════════ */
+const SVG = {
+  cam:'<path d="M3 8.5A2 2 0 0 1 5 6.5h2L8.4 4.5h7.2L17 6.5h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.6" r="3.5"/>',
+  img:'<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.8"/><path d="M3 17l5-4.5 4 3 4.5-4L21 16"/>',
+  plus:'<path d="M12 5v14M5 12h14"/>',
+  refresh:'<path d="M20.5 12a8.5 8.5 0 1 1-2.4-5.9"/><path d="M20.5 3.5v4.8h-4.8"/>',
+  check:'<path d="M4 12.5l5 5 11-11.5"/>',
+  dl:'<path d="M12 3.5v12M7 10.5l5 5 5-5M4.5 20.5h15"/>',
+  trash:'<path d="M4 6.5h16M9 6.5V4h6v2.5M6 6.5l1 14h10l1-14"/>',
+  pen:'<path d="M4 20l4.2-1L20 7.2a2 2 0 0 0-3.2-3.2L5 15.8z"/><path d="M14.5 6L18 9.5"/>',
+  x:'<path d="M6 6l12 12M18 6L6 18"/>',
+  spark:'<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
+};
+const ic = (k,w) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w||2}" stroke-linecap="round" stroke-linejoin="round">${SVG[k]}</svg>`;
+
+/* ═══════════ 儲存 ═══════════ */
+const load = (k,d) => { try{ const v=localStorage.getItem(k); return v==null?d:JSON.parse(v); }catch(e){ return d; } };
+const save = (k,v) => { try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){ toast('儲存失敗，空間可能已滿','err'); } };
+
+const state = {
+  trips:    load('te_trips',[]),
+  entries:  load('te_entries',[]),
+  current:  load('te_current',null),
+  apiKey:   load('te_api_key',''),
+  rates:    load('te_rates',{...DEFAULT_RATE}),
+  rateInfo: load('te_rate_info',{status:'預設值',time:''}),
+  page:     load('te_page','capture'),
+  filter:   '全部',
+};
+
+/* ═══════════ IndexedDB（照片，不限筆數）═══════════ */
+let _db=null;
+function db(){
+  return new Promise((res,rej)=>{
+    if(_db) return res(_db);
+    const r=indexedDB.open('travel_expense',1);
+    r.onupgradeneeded=()=>{ if(!r.result.objectStoreNames.contains('photos')) r.result.createObjectStore('photos'); };
+    r.onsuccess=()=>{ _db=r.result; res(_db); };
+    r.onerror=()=>rej(r.error);
+  });
+}
+async function putPhoto(id,data){
+  const d=await db();
+  return new Promise((res,rej)=>{ const t=d.transaction('photos','readwrite'); t.objectStore('photos').put(data,id); t.oncomplete=res; t.onerror=()=>rej(t.error); });
+}
+async function getPhoto(id){
+  const d=await db();
+  return new Promise((res)=>{ const t=d.transaction('photos','readonly'); const q=t.objectStore('photos').get(id); q.onsuccess=()=>res(q.result||null); q.onerror=()=>res(null); });
+}
+async function delPhoto(id){
+  const d=await db();
+  return new Promise((res)=>{ const t=d.transaction('photos','readwrite'); t.objectStore('photos').delete(id); t.oncomplete=res; t.onerror=res; });
+}
+
+/* ═══════════ 小工具 ═══════════ */
+const $ = s => document.querySelector(s);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const uid = p => p + Date.now().toString(36) + Math.floor(Math.random()*1e4).toString(36);
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const todayStr = () => { const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+const rateOf = cur => cur==='TWD' ? 1 : (state.rates[cur]||DEFAULT_RATE[cur]||1);
+const toTWD  = (amt,cur) => Math.round((+amt||0)*rateOf(cur));
+
+let toastT=null;
+function toast(msg,type){
+  const t=$('#toast'); t.textContent=msg; t.className=''; if(type) t.classList.add(type);
+  t.classList.add('show'); clearTimeout(toastT);
+  toastT=setTimeout(()=>t.classList.remove('show'),2400);
+}
+function curTrip(){ return state.trips.find(t=>t.id===state.current)||null; }
+function tripEntries(id){ return state.entries.filter(e=>e.tripId===id); }
+
+/* ═══════════ 匯率 ═══════════ */
+function setRate(cur,val){
+  const [lo,hi]=RATE_RANGE[cur]||[0,1e9];
+  if(isFinite(val)&&val>=lo&&val<=hi){ state.rates[cur]=+val.toFixed(5); return true; }
+  return false;
+}
+async function fetchRates(silent){
+  const btn=document.querySelector('.r-ref'); if(btn) btn.classList.add('spin');
+  let ok=false;
+  try{
+    const r=await fetch('https://open.er-api.com/v6/latest/TWD');
+    const j=await r.json();
+    if(j&&j.rates){
+      if(j.rates.JPY) ok=setRate('JPY',1/j.rates.JPY)||ok;
+      if(j.rates.KRW) ok=setRate('KRW',1/j.rates.KRW)||ok;
+    }
+  }catch(e){}
+  if(!ok){
+    try{
+      const r=await fetch('https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/twd.json');
+      const j=await r.json();
+      if(j&&j.twd){
+        if(j.twd.jpy) ok=setRate('JPY',1/j.twd.jpy)||ok;
+        if(j.twd.krw) ok=setRate('KRW',1/j.twd.krw)||ok;
+      }
+    }catch(e){}
+  }
+  const now=new Date();
+  state.rateInfo = ok
+    ? {status:'即時匯率', time:now.getHours()+':'+String(now.getMinutes()).padStart(2,'0')}
+    : {status:'離線・非即時', time:state.rateInfo.time};
+  save('te_rates',state.rates); save('te_rate_info',state.rateInfo);
+  if(btn) btn.classList.remove('spin');
+  if(!silent) toast(ok?'匯率已更新':'抓取失敗，使用上次匯率',ok?'ok':'err');
+  if(state.page==='capture') renderCapture();
+  if(state.page==='settings') renderSettings();
+}
+
+/* ═══════════ 照片壓縮 ═══════════ */
+function compress(file){
+  return new Promise((res,rej)=>{
+    const fr=new FileReader();
+    fr.onload=()=>{
+      const img=new Image();
+      img.onload=()=>{
+        let w=img.width,h=img.height; const MAX=1280;
+        if(w>MAX||h>MAX){ const s=MAX/Math.max(w,h); w=Math.round(w*s); h=Math.round(h*s); }
+        const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+        cv.getContext('2d').drawImage(img,0,0,w,h);
+        res(cv.toDataURL('image/jpeg',0.72));
+      };
+      img.onerror=()=>rej(new Error('影像讀取失敗'));
+      img.src=fr.result;
+    };
+    fr.onerror=()=>rej(new Error('檔案讀取失敗'));
+    fr.readAsDataURL(file);
+  });
+}
+
+/* ═══════════ AI 辨識 ═══════════ */
+const AI_PROMPT =
+'這是一張旅遊消費的發票或收據照片。請辨識內容，只回傳一個 JSON 物件，不要任何說明文字、不要 markdown 標記：\n'+
+'{"amount": 總金額的數字(只要數字,不含貨幣符號與逗號), "currency": "JPY" 或 "KRW" 或 "TWD", '+
+'"date": "YYYY-MM-DD格式的消費日期", "merchant": "商家名稱(原文或中文皆可)", '+
+'"category": "機票"或"住宿"或"餐飲"或"交通"或"購物"或"景點"或"其他"}\n'+
+'判斷不出來時：amount 給 0，date 給空字串，merchant 給空字串，category 給"其他"。';
+
+async function aiRecognize(dataUrl){
+  if(!state.apiKey){ toast('請先到「設定」貼上 AI 金鑰','err'); switchPage('settings'); return null; }
+  $('#loading').classList.add('show');
+  try{
+    const b64=dataUrl.split(',')[1];
+    const r=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'content-type':'application/json',
+        'x-api-key':state.apiKey,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true',
+      },
+      body:JSON.stringify({
+        model:AI_MODEL, max_tokens:500,
+        messages:[{role:'user',content:[
+          {type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},
+          {type:'text',text:AI_PROMPT},
+        ]}],
+      }),
+    });
+    const j=await r.json();
+    if(!r.ok){ throw new Error((j.error&&j.error.message)||('HTTP '+r.status)); }
+    const txt=(j.content&&j.content[0]&&j.content[0].text)||'';
+    const m=txt.match(/\{[\s\S]*\}/);
+    if(!m) throw new Error('AI 回傳格式無法解析');
+    const d=JSON.parse(m[0]);
+    return {
+      amount:+d.amount||0,
+      currency:CUR[d.currency]?d.currency:'JPY',
+      date:/^\d{4}-\d{2}-\d{2}$/.test(d.date||'')?d.date:todayStr(),
+      merchant:(d.merchant||'').trim(),
+      category:CATS.includes(d.category)?d.category:'其他',
+    };
+  }catch(e){
+    toast('辨識失敗：'+e.message,'err');
+    return null;
+  }finally{
+    $('#loading').classList.remove('show');
+  }
+}
+
+/* ═══════════ 頁面：拍發票 ═══════════ */
+function renderCapture(){
+  const el=$('#page-capture'); const trip=curTrip();
+  if(!trip){
+    el.innerHTML=emptyTrip('還沒有旅程','建立第一趟旅程，就能開始拍發票記帳');
+    el.querySelector('.btn').onclick=()=>openTripEditor(null);
+    return;
+  }
+  const cur=trip.country==='KR'?'KRW':'JPY';
+  const flag=trip.country==='KR'?'KR':'JP';
+  const tEnt=tripEntries(trip.id);
+  const today=todayStr();
+  const todayEnt=tEnt.filter(e=>e.date===today);
+  el.innerHTML=`
+    <div class="rate">
+      <span class="jpflag">${flag}</span>
+      <span class="r-name">${flag==='KR'?'韓國':'日本'}</span>
+      <span class="r-val">
+        ${CUR[cur].sym}1 ≈ <span class="num">NT$${rateOf(cur)}</span>
+        <small>${esc(state.rateInfo.status)}${state.rateInfo.time?' · '+state.rateInfo.time:''}</small>
+      </span>
+      <button class="r-ref" id="rateRef">${ic('refresh')}</button>
+    </div>
+    <button class="camzone" id="camBtn">
+      <span class="cam-ic">${ic('cam')}</span>
+      <span class="cam-t">拍發票</span>
+      <span class="cam-s">把發票放進取景框，AI 自動讀取金額與日期</span>
+    </button>
+    <div class="btn-row">
+      <button class="btn" id="albumBtn">${ic('img')}從相簿</button>
+      <button class="btn" id="manualBtn">${ic('plus')}手動新增</button>
+    </div>
+    <div class="ai-hint">AI 辨識每筆約 <span class="num">NT$0.15</span>　·　手動新增完全免費</div>
+    <div class="today-h">今天 · 已記 <span class="num">${todayEnt.length}</span> 筆</div>
+    ${todayEnt.length
+      ? `<div class="list">${todayEnt.slice().reverse().map(entryRow).join('')}</div>`
+      : `<div class="empty" style="padding:26px"><p>今天還沒有記錄，<br>拍張發票開始吧</p></div>`}
+  `;
+  $('#rateRef').onclick=()=>fetchRates(false);
+  $('#camBtn').onclick=()=>$('#fileCamera').click();
+  $('#albumBtn').onclick=()=>$('#fileAlbum').click();
+  $('#manualBtn').onclick=()=>openForm('manual',null,null);
+  bindEntryRows(el);
+  hydrateThumbs(el);
+}
+
+/* ═══════════ 頁面：帳本 ═══════════ */
+function renderLedger(){
+  const el=$('#page-ledger'); const trip=curTrip();
+  if(!trip){
+    el.innerHTML=emptyTrip('還沒有旅程','建立旅程後，這裡會顯示帳本與統計');
+    el.querySelector('.btn').onclick=()=>openTripEditor(null);
+    return;
+  }
+  const all=tripEntries(trip.id).slice().sort((a,b)=>
+    (b.date||'').localeCompare(a.date||'') || b.createdAt-a.createdAt);
+  const total=all.reduce((s,e)=>s+e.twd,0);
+  const days=tripDays(trip,all);
+  const list = state.filter==='全部' ? all : all.filter(e=>e.cat===state.filter);
+
+  let budgetHtml='';
+  if(trip.budget>0){
+    const pct=Math.min(100,Math.round(total/trip.budget*100));
+    const over=total>trip.budget;
+    budgetHtml=`<div class="budget">
+      <div class="bud-row">
+        <span>預算進度</span>
+        <span class="${over?'over':''}"><span class="num">${Math.round(total/trip.budget*100)}%</span> · 預算 NT$<span class="num">${fmt(trip.budget)}</span></span>
+      </div>
+      <div class="bar"><i class="${over?'over':''}" style="width:${pct}%"></i></div>
+    </div>`;
+  }
+  el.innerHTML=`
+    <div class="summary">
+      <div class="sum-lab">總 花 費</div>
+      <div class="sum-big">NT$${fmt(total)}</div>
+      <div class="sum-sub">${esc(trip.name)}${tripRange(trip)?' · '+tripRange(trip):''}</div>
+      ${budgetHtml}
+      <div class="sum-stats">
+        <div class="stat"><span class="num">${all.length}</span><small>筆 數</small></div>
+        <div class="stat"><span class="num">${days}</span><small>天 數</small></div>
+        <div class="stat"><span class="num">NT$${fmt(days?total/days:0)}</span><small>日 均</small></div>
+      </div>
+    </div>
+    <div class="filter">
+      ${['全部',...CATS].map(c=>`<button class="chip${state.filter===c?' on':''}" data-cat="${c}">${c}</button>`).join('')}
+    </div>
+    ${list.length
+      ? `<div class="list">${list.map(entryRow).join('')}</div>`
+      : `<div class="empty" style="padding:34px 24px"><p>${all.length?'這個分類還沒有記錄':'這趟旅程還沒有記帳<br>到「拍發票」開始吧'}</p></div>`}
+    ${all.length?`<div style="margin-top:16px;display:flex;gap:10px">
+      <button class="btn" id="expCsv">${ic('dl')}CSV</button>
+      <button class="btn" id="expXlsx">${ic('dl')}Excel</button>
+    </div>`:''}
+  `;
+  el.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{ state.filter=c.dataset.cat; renderLedger(); });
+  if($('#expCsv')) $('#expCsv').onclick=exportCSV;
+  if($('#expXlsx')) $('#expXlsx').onclick=exportXLSX;
+  bindEntryRows(el);
+  hydrateThumbs(el);
+}
+
+function entryRow(e){
+  return `<div class="entry" data-id="${e.id}">
+    <span class="e-thumb" data-photo="${e.hasPhoto?e.id:''}">${e.hasPhoto?'':ic('cam')}</span>
+    <span class="e-info">
+      <span class="e-name">${esc(e.merchant||'(未命名)')}</span>
+      <span class="e-meta"><span class="tag">${esc(e.cat)}</span><span class="num">${esc((e.date||'').slice(5).replace('-','/'))}</span></span>
+    </span>
+    <span class="leader"></span>
+    <span class="e-price">
+      <span class="yen">${CUR[e.currency].sym}${fmt(e.amount)}</span>
+      <span class="ntd">NT$${fmt(e.twd)}</span>
+    </span>
+  </div>`;
+}
+function bindEntryRows(scope){
+  scope.querySelectorAll('.entry').forEach(row=>{
+    const id=row.dataset.id;
+    row.onclick=ev=>{
+      if(ev.target.closest('.e-thumb') && ev.target.closest('.e-thumb').dataset.photo){
+        openLightbox(id); return;
+      }
+      const e=state.entries.find(x=>x.id===id);
+      if(e) openForm('edit',e,null);
+    };
+  });
+}
+async function hydrateThumbs(scope){
+  const thumbs=scope.querySelectorAll('.e-thumb[data-photo]');
+  for(const t of thumbs){
+    const pid=t.dataset.photo; if(!pid) continue;
+    const data=await getPhoto(pid);
+    if(data){ t.style.backgroundImage=`url(${data})`; t.innerHTML=''; }
+  }
+}
+async function openLightbox(id){
+  const data=await getPhoto(id);
+  if(!data){ toast('找不到照片'); return; }
+  $('#lightboxImg').src=data;
+  $('#lightbox').classList.add('show');
+}
+
+/* ═══════════ 頁面：設定 ═══════════ */
+function renderSettings(){
+  const el=$('#page-settings');
+  el.innerHTML=`
+    <div class="sec">
+      <p class="sec-title">旅 程 管 理</p>
+      <div id="tripList"></div>
+      <button class="btn" id="addTrip" style="margin-top:11px">${ic('plus')}新增旅程</button>
+    </div>
+    <div class="sec">
+      <p class="sec-title">匯 率</p>
+      <div class="card">
+        <div class="row2">
+          <div class="field"><span class="f-label">日圓 JPY · ¥1 =</span>
+            <input class="input num" id="rJPY" inputmode="decimal" value="${state.rates.JPY}"></div>
+          <div class="field"><span class="f-label">韓元 KRW · ₩1 =</span>
+            <input class="input num" id="rKRW" inputmode="decimal" value="${state.rates.KRW}"></div>
+        </div>
+        <div class="btn-row" style="margin-top:13px">
+          <button class="btn" id="saveRate">${ic('check')}儲存匯率</button>
+          <button class="btn" id="refRate">${ic('refresh')}重新抓取</button>
+        </div>
+        <p class="hint">目前狀態：${esc(state.rateInfo.status)}${state.rateInfo.time?'（'+state.rateInfo.time+'）':''}。換算成台幣，數字＝1 單位外幣等於多少台幣。</p>
+      </div>
+    </div>
+    <div class="sec">
+      <p class="sec-title">A I　金 鑰</p>
+      <div class="card">
+        <div class="field">
+          <span class="f-label">Anthropic API Key</span>
+          <input class="input" id="apiKey" type="password" placeholder="sk-ant-..." value="${esc(state.apiKey)}" style="font-weight:500">
+        </div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn--solid" id="saveKey">${ic('check')}儲存金鑰</button>
+        </div>
+        <p class="hint">拍發票 AI 辨識需要金鑰，一次辨識約 NT$0.15。金鑰只存在這支手機（localStorage），不會上傳。手動新增不需金鑰、完全免費。</p>
+      </div>
+    </div>
+    <div class="sec">
+      <p class="sec-title">資 料</p>
+      <div class="card">
+        <div class="btn-row" style="margin-top:0">
+          <button class="btn" id="setCsv">${ic('dl')}匯出 CSV</button>
+          <button class="btn" id="setXlsx">${ic('dl')}匯出 Excel</button>
+        </div>
+        <button class="btn" id="clearTrip" style="margin-top:10px;border-color:var(--a1);color:var(--a1)">${ic('trash')}清空目前旅程帳本</button>
+        <p class="hint">匯出的是目前旅程的全部記錄。收據照片存在本機 IndexedDB，不限筆數、可存上千張，受手機儲存空間限制，照片不跨裝置同步。</p>
+      </div>
+    </div>
+    <div class="sec">
+      <p class="sec-title">關 於</p>
+      <div class="card about">
+        <b>旅行記帳</b>　<span class="ver">${VERSION}</span><br>
+        個人旅遊支出記帳工具。拍發票 → AI 辨識 → 分趟旅程帳本。<br>
+        資料全部存在本機，沒有雲端、沒有帳號。
+      </div>
+    </div>
+  `;
+  renderTripList();
+  $('#addTrip').onclick=()=>openTripEditor(null);
+  $('#saveRate').onclick=()=>{
+    let ok=true;
+    if(!setRate('JPY',parseFloat($('#rJPY').value))) ok=false;
+    if(!setRate('KRW',parseFloat($('#rKRW').value))) ok=false;
+    save('te_rates',state.rates);
+    if(ok){ state.rateInfo={status:'手動設定',time:''}; save('te_rate_info',state.rateInfo); toast('匯率已儲存','ok'); }
+    else toast('匯率超出合理範圍，請檢查','err');
+    renderSettings();
+  };
+  $('#refRate').onclick=()=>fetchRates(false);
+  $('#saveKey').onclick=()=>{
+    state.apiKey=$('#apiKey').value.trim(); save('te_api_key',state.apiKey);
+    toast(state.apiKey?'金鑰已儲存':'金鑰已清除','ok');
+  };
+  $('#setCsv').onclick=exportCSV;
+  $('#setXlsx').onclick=exportXLSX;
+  $('#clearTrip').onclick=clearCurrentTrip;
+}
+function renderTripList(){
+  const box=$('#tripList'); if(!box) return;
+  if(!state.trips.length){ box.innerHTML=`<p class="hint" style="margin:0">還沒有旅程，點下方新增。</p>`; return; }
+  box.innerHTML=state.trips.map(t=>{
+    const n=tripEntries(t.id).length;
+    return `<div class="trip-item${t.id===state.current?' cur':''}" data-id="${t.id}">
+      <span class="ti-cur">${t.country==='KR'?'KR':'JP'}</span>
+      <span class="ti-info">
+        <span class="ti-name">${esc(t.name)}</span>
+        <span class="ti-meta">${tripRange(t)||'未設定日期'} · ${n} 筆${t.id===state.current?' · 使用中':''}</span>
+      </span>
+      <button class="ti-edit" data-edit="${t.id}">${ic('pen')}</button>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.trip-item').forEach(r=>{
+    r.onclick=ev=>{
+      if(ev.target.closest('[data-edit]')){ openTripEditor(state.trips.find(t=>t.id===r.dataset.id)); return; }
+      state.current=r.dataset.id; save('te_current',state.current);
+      toast('已切換到 '+curTrip().name,'ok'); renderTopbar(); renderSettings();
+    };
+  });
+}
+
+/* ═══════════ 旅程編輯 ═══════════ */
+function openTripEditor(trip){
+  const isNew=!trip;
+  const t=trip||{name:'',country:'JP',start:'',end:'',budget:0};
+  sheet('旅程設定',`
+    <div class="field"><span class="f-label">旅程名稱</span>
+      <input class="input" id="tName" placeholder="例：2026 東京" value="${esc(t.name)}"></div>
+    <div class="field"><span class="f-label">主要國家（決定預設幣別）</span>
+      <select class="select" id="tCountry">
+        <option value="JP"${t.country==='JP'?' selected':''}>日本（日圓 JPY）</option>
+        <option value="KR"${t.country==='KR'?' selected':''}>韓國（韓元 KRW）</option>
+      </select></div>
+    <div class="field"><div class="row2">
+      <div class="field" style="margin:0"><span class="f-label">出發日</span>
+        <input class="input" id="tStart" type="date" value="${esc(t.start)}"></div>
+      <div class="field" style="margin:0"><span class="f-label">回程日</span>
+        <input class="input" id="tEnd" type="date" value="${esc(t.end)}"></div>
+    </div></div>
+    <div class="field"><span class="f-label">旅程預算（台幣，可留空）</span>
+      <input class="input num" id="tBudget" inputmode="numeric" placeholder="例：50000" value="${t.budget>0?t.budget:''}"></div>
+    <button class="btn btn--solid" id="tSave" style="margin-top:18px">${ic('check')}${isNew?'建立旅程':'儲存'}</button>
+    ${isNew?'':`<button class="btn" id="tDel" style="margin-top:10px;border-color:var(--a1);color:var(--a1)">${ic('trash')}刪除這趟旅程</button>`}
+  `);
+  $('#tSave').onclick=()=>{
+    const name=$('#tName').value.trim();
+    if(!name){ toast('請輸入旅程名稱','err'); return; }
+    const data={
+      name,
+      country:$('#tCountry').value,
+      start:$('#tStart').value,
+      end:$('#tEnd').value,
+      budget:Math.max(0,parseInt($('#tBudget').value,10)||0),
+    };
+    if(isNew){
+      const nt={id:uid('t'),createdAt:Date.now(),...data};
+      state.trips.push(nt); state.current=nt.id; save('te_current',state.current);
+    }else{
+      Object.assign(trip,data);
+    }
+    save('te_trips',state.trips);
+    closeSheet(); toast(isNew?'旅程已建立','ok'); renderAll();
+  };
+  if(!isNew){
+    $('#tDel').onclick=()=>{
+      confirmDialog('刪除旅程？',`「${trip.name}」與其中 ${tripEntries(trip.id).length} 筆記錄、發票照片都會一併刪除，無法復原。`,async()=>{
+        for(const e of tripEntries(trip.id)){ if(e.hasPhoto) await delPhoto(e.id); }
+        state.entries=state.entries.filter(e=>e.tripId!==trip.id);
+        state.trips=state.trips.filter(x=>x.id!==trip.id);
+        if(state.current===trip.id) state.current=state.trips[0]?state.trips[0].id:null;
+        save('te_entries',state.entries); save('te_trips',state.trips); save('te_current',state.current);
+        closeSheet(); toast('旅程已刪除'); renderAll();
+      });
+    };
+  }
+}
+function tripRange(t){
+  if(t.start&&t.end) return t.start.slice(5).replace('-','/')+'–'+t.end.slice(5).replace('-','/');
+  if(t.start) return t.start.slice(5).replace('-','/')+' 起';
+  return '';
+}
+function tripDays(t,ents){
+  if(t.start&&t.end){
+    const d=(new Date(t.end)-new Date(t.start))/864e5;
+    if(isFinite(d)&&d>=0) return d+1;
+  }
+  const set=new Set((ents||tripEntries(t.id)).map(e=>e.date).filter(Boolean));
+  return Math.max(1,set.size);
+}
+
+/* ═══════════ 記帳表單（新增 / AI / 編輯）═══════════ */
+let formPhoto=null;     // 暫存照片 dataURL（新增時）
+let formAiDone=false;
+
+function openForm(mode,entry,photoData){
+  const trip=curTrip();
+  if(!trip){ toast('請先建立旅程','err'); return; }
+  formPhoto = photoData || null;
+  formAiDone = false;
+  const e = entry || {
+    cat:'其他', merchant:'', date:todayStr(),
+    amount:'', currency:trip.country==='KR'?'KRW':'JPY', note:'',
+  };
+  const hasPhoto = mode==='edit' ? entry.hasPhoto : !!formPhoto;
+  const canAI = mode!=='edit' && !!formPhoto;
+
+  sheet(mode==='edit'?'編輯記錄':(formPhoto?'新增記錄':'手動新增'),`
+    ${ (hasPhoto||mode!=='edit') ? `
+    <div class="photo-box" id="photoBox">
+      ${hasPhoto?'<div class="ph-empty"><span>載入照片中…</span></div>'
+        :`<div class="ph-empty">${ic('cam')}<span>沒有發票照片（手動記錄）</span></div>`}
+    </div>` : '' }
+    ${canAI?`<button class="btn btn--mint" id="aiBtn" style="margin-top:11px">${ic('spark')}用 AI 辨識這張發票（約 NT$0.15）</button>`:''}
+    <div class="field"${canAI?' style="margin-top:13px"':''}>
+      <span class="f-label">金額</span>
+      <div class="amt-wrap">
+        <input class="input" id="fAmt" inputmode="decimal" placeholder="0" value="${e.amount!==''&&e.amount!=null?e.amount:''}">
+        <select class="select" id="fCur">
+          ${Object.keys(CUR).map(k=>`<option value="${k}"${e.currency===k?' selected':''}>${k}</option>`).join('')}
+        </select>
+      </div>
+      <div class="conv" id="fConv"></div>
+    </div>
+    <div class="field"><span class="f-label">日期</span>
+      <input class="input" id="fDate" type="date" value="${esc(e.date)}"></div>
+    <div class="field"><span class="f-label">商家</span>
+      <input class="input" id="fMerch" placeholder="例：ドン・キホーテ 渋谷店" value="${esc(e.merchant)}"></div>
+    <div class="field"><span class="f-label">分類</span>
+      <div class="chips-pick" id="fCats">
+        ${CATS.map(c=>`<button class="cpk${e.cat===c?' on':''}" data-c="${c}">${c}</button>`).join('')}
+      </div></div>
+    <div class="field"><span class="f-label">備註（可留空）</span>
+      <textarea class="input" id="fNote" rows="2" placeholder="例：幫兒子買的玩具">${esc(e.note)}</textarea></div>
+    <button class="btn btn--solid" id="fSave" style="margin-top:18px">${ic('check')}存入帳本</button>
+    ${mode==='edit'?`<button class="btn" id="fDel" style="margin-top:10px;border-color:var(--a1);color:var(--a1)">${ic('trash')}刪除這筆</button>`:''}
+  `);
+
+  // 換算即時顯示
+  const updateConv=()=>{
+    const cur=$('#fCur').value, amt=parseFloat($('#fAmt').value)||0;
+    $('#fConv').innerHTML = cur==='TWD'
+      ? '台幣金額'
+      : `≈ <span class="num">NT$${fmt(toTWD(amt,cur))}</span>　（${CUR[cur].sym}1 = NT$${rateOf(cur)}）`;
+  };
+  $('#fAmt').oninput=updateConv; $('#fCur').onchange=updateConv; updateConv();
+
+  // 分類
+  let pickCat=e.cat;
+  $('#fCats').querySelectorAll('.cpk').forEach(b=>b.onclick=()=>{
+    pickCat=b.dataset.c;
+    $('#fCats').querySelectorAll('.cpk').forEach(x=>x.classList.toggle('on',x===b));
+  });
+
+  // 載入照片
+  if(hasPhoto){
+    const box=$('#photoBox');
+    (async()=>{
+      const data = formPhoto || (mode==='edit'? await getPhoto(entry.id):null);
+      if(data){ box.innerHTML=`<img src="${data}" alt="發票照片"><button class="ph-retake" id="reTake">重拍 / 換照片</button>`;
+        box.querySelector('img').onclick=()=>{ $('#lightboxImg').src=data; $('#lightbox').classList.add('show'); };
+        $('#reTake').onclick=()=>{ formMode=mode; $('#fileAlbum').click(); };
+      } else box.innerHTML=`<div class="ph-empty">${ic('cam')}<span>照片載入失敗</span></div>`;
+    })();
+  }
+
+  // AI 辨識
+  if(canAI){
+    $('#aiBtn').onclick=async()=>{
+      const res=await aiRecognize(formPhoto);
+      if(!res) return;
+      $('#fAmt').value=res.amount||'';
+      $('#fCur').value=res.currency;
+      $('#fDate').value=res.date;
+      $('#fMerch').value=res.merchant;
+      pickCat=res.category;
+      $('#fCats').querySelectorAll('.cpk').forEach(x=>x.classList.toggle('on',x.dataset.c===res.category));
+      updateConv(); formAiDone=true;
+      $('#aiBtn').innerHTML=ic('check')+'已辨識，請確認下方欄位';
+      toast('AI 辨識完成，請確認','ok');
+    };
+  }
+
+  // 儲存
+  $('#fSave').onclick=async()=>{
+    const amt=parseFloat($('#fAmt').value)||0;
+    if(amt<=0){ toast('請輸入金額','err'); return; }
+    const cur=$('#fCur').value;
+    const rec={
+      cat:pickCat,
+      merchant:$('#fMerch').value.trim(),
+      date:$('#fDate').value||todayStr(),
+      amount:amt, currency:cur, twd:toTWD(amt,cur),
+      note:$('#fNote').value.trim(),
+    };
+    if(mode==='edit'){
+      Object.assign(entry,rec);
+      if(formPhoto){ entry.hasPhoto=true; await putPhoto(entry.id,formPhoto); }
+    }else{
+      const ne={id:uid('e'),tripId:trip.id,createdAt:Date.now(),hasPhoto:!!formPhoto,...rec};
+      if(formPhoto) await putPhoto(ne.id,formPhoto);
+      state.entries.push(ne);
+    }
+    save('te_entries',state.entries);
+    closeSheet(); toast('已存入帳本','ok'); renderAll();
+  };
+
+  // 刪除
+  if(mode==='edit'){
+    $('#fDel').onclick=()=>{
+      confirmDialog('刪除這筆記錄？','刪除後無法復原。',async()=>{
+        if(entry.hasPhoto) await delPhoto(entry.id);
+        state.entries=state.entries.filter(x=>x.id!==entry.id);
+        save('te_entries',state.entries);
+        closeSheet(); toast('已刪除'); renderAll();
+      });
+    };
+  }
+}
+
+/* 重拍：相簿 / 相機回來後若表單開著就換照片 */
+let formMode=null;
+async function handleFile(file){
+  if(!file) return;
+  let data;
+  try{ data=await compress(file); }
+  catch(err){ toast('照片處理失敗','err'); return; }
+  if($('#scrim').classList.contains('show') && $('#photoBox')){
+    // 表單開著 → 換照片
+    formPhoto=data;
+    const box=$('#photoBox');
+    box.innerHTML=`<img src="${data}" alt="發票照片"><button class="ph-retake" id="reTake">重拍 / 換照片</button>`;
+    box.querySelector('img').onclick=()=>{ $('#lightboxImg').src=data; $('#lightbox').classList.add('show'); };
+    $('#reTake').onclick=()=>$('#fileAlbum').click();
+    toast('照片已更新');
+  }else{
+    openForm('photo',null,data);
+  }
+}
+
+/* ═══════════ 匯出 ═══════════ */
+function exportRows(){
+  const trip=curTrip(); if(!trip||!tripEntries(trip.id).length){ toast('沒有可匯出的記錄','err'); return null; }
+  const rows=tripEntries(trip.id).slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  return {trip,rows};
+}
+const EXP_HEAD=['旅程','日期','分類','商家','幣別','外幣金額','台幣金額','備註'];
+function exportCSV(){
+  const d=exportRows(); if(!d) return;
+  const cell=v=>{ const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+  let csv=EXP_HEAD.join(',')+'\n';
+  d.rows.forEach(e=>{
+    csv+=[d.trip.name,e.date,e.cat,e.merchant,e.currency,e.amount,e.twd,e.note].map(cell).join(',')+'\n';
+  });
+  downloadBlob(new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'}),'旅行記帳_'+d.trip.name+'_'+todayStr()+'.csv');
+  toast('CSV 已匯出','ok');
+}
+function exportXLSX(){
+  const d=exportRows(); if(!d) return;
+  const xesc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const colL=i=>String.fromCharCode(65+i);
+  let rowsXml='';
+  const head=EXP_HEAD.map((h,i)=>`<c r="${colL(i)}1" t="inlineStr"><is><t>${xesc(h)}</t></is></c>`).join('');
+  rowsXml+=`<row r="1">${head}</row>`;
+  d.rows.forEach((e,ri)=>{
+    const r=ri+2;
+    const cells=[d.trip.name,e.date,e.cat,e.merchant,e.currency,e.amount,e.twd,e.note].map((v,ci)=>{
+      const ref=colL(ci)+r;
+      if(ci===5||ci===6) return `<c r="${ref}"><v>${+v||0}</v></c>`;
+      return `<c r="${ref}" t="inlineStr"><is><t>${xesc(v)}</t></is></c>`;
+    }).join('');
+    rowsXml+=`<row r="${r}">${cells}</row>`;
+  });
+  const sheet=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rowsXml}</sheetData></worksheet>`;
+  const files=[
+    {name:'[Content_Types].xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`},
+    {name:'_rels/.rels',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`},
+    {name:'xl/workbook.xml',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="旅行記帳" sheetId="1" r:id="rId1"/></sheets></workbook>`},
+    {name:'xl/_rels/workbook.xml.rels',data:`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`},
+    {name:'xl/worksheets/sheet1.xml',data:sheet},
+  ];
+  downloadBlob(zipStore(files),'旅行記帳_'+d.trip.name+'_'+todayStr()+'.xlsx');
+  toast('Excel 已匯出','ok');
+}
+function downloadBlob(blob,name){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download=name;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },1500);
+}
+/* ZIP（store，無壓縮）+ CRC32 — 純前端產 xlsx */
+let _crcT;
+function crc32(bytes){
+  if(!_crcT){ _crcT=[]; for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); _crcT[n]=c>>>0; } }
+  let crc=0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) crc=(crc>>>8)^_crcT[(crc^bytes[i])&0xFF];
+  return (crc^0xFFFFFFFF)>>>0;
+}
+function zipStore(files){
+  const enc=new TextEncoder();
+  const parts=[], central=[]; let offset=0;
+  files.forEach(f=>{
+    const nameB=enc.encode(f.name), dataB=enc.encode(f.data), crc=crc32(dataB);
+    const lh=new DataView(new ArrayBuffer(30));
+    lh.setUint32(0,0x04034b50,true); lh.setUint16(4,20,true); lh.setUint16(6,0,true);
+    lh.setUint16(8,0,true); lh.setUint16(10,0,true); lh.setUint16(12,0,true);
+    lh.setUint32(14,crc,true); lh.setUint32(18,dataB.length,true); lh.setUint32(22,dataB.length,true);
+    lh.setUint16(26,nameB.length,true); lh.setUint16(28,0,true);
+    parts.push(new Uint8Array(lh.buffer),nameB,dataB);
+    const ch=new DataView(new ArrayBuffer(46));
+    ch.setUint32(0,0x02014b50,true); ch.setUint16(4,20,true); ch.setUint16(6,20,true);
+    ch.setUint16(8,0,true); ch.setUint16(10,0,true); ch.setUint16(12,0,true); ch.setUint16(14,0,true);
+    ch.setUint32(16,crc,true); ch.setUint32(20,dataB.length,true); ch.setUint32(24,dataB.length,true);
+    ch.setUint16(28,nameB.length,true); ch.setUint32(42,offset,true);
+    central.push({h:new Uint8Array(ch.buffer),n:nameB});
+    offset+=30+nameB.length+dataB.length;
+  });
+  const cdStart=offset; let cdSize=0;
+  central.forEach(c=>{ parts.push(c.h,c.n); cdSize+=46+c.n.length; });
+  const eo=new DataView(new ArrayBuffer(22));
+  eo.setUint32(0,0x06054b50,true);
+  eo.setUint16(8,files.length,true); eo.setUint16(10,files.length,true);
+  eo.setUint32(12,cdSize,true); eo.setUint32(16,cdStart,true);
+  parts.push(new Uint8Array(eo.buffer));
+  return new Blob(parts,{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+
+/* ═══════════ 清空 ═══════════ */
+function clearCurrentTrip(){
+  const trip=curTrip(); if(!trip){ toast('沒有旅程','err'); return; }
+  const ents=tripEntries(trip.id);
+  if(!ents.length){ toast('帳本已經是空的'); return; }
+  confirmDialog('清空帳本？',`「${trip.name}」的 ${ents.length} 筆記錄與發票照片會全部刪除，旅程本身保留。`,async()=>{
+    for(const e of ents){ if(e.hasPhoto) await delPhoto(e.id); }
+    state.entries=state.entries.filter(e=>e.tripId!==trip.id);
+    save('te_entries',state.entries);
+    closeSheet(); toast('帳本已清空'); renderAll();
+  });
+}
+
+/* ═══════════ 抽屜 / 彈窗 ═══════════ */
+function sheet(title,bodyHtml){
+  const s=$('#scrim');
+  s.innerHTML=`<div class="sheet"><div class="sheet-hd"><h2>${esc(title)}</h2>
+    <button class="sheet-x" id="sheetX">${ic('x')}</button></div>
+    <div class="sheet-bd">${bodyHtml}</div></div>`;
+  s.className='scrim show';
+  $('#sheetX').onclick=closeSheet;
+  s.querySelector('.sheet').onclick=e=>e.stopPropagation();
+  s.onclick=closeSheet;
+}
+function closeSheet(){ $('#scrim').className='scrim'; $('#scrim').innerHTML=''; }
+function confirmDialog(title,msg,onYes){
+  const s=$('#scrim');
+  s.innerHTML=`<div class="confirm-box"><h3>${esc(title)}</h3><p>${esc(msg)}</p>
+    <button class="btn btn--solid" id="cYes" style="border-color:var(--a1);background:var(--a1)">確定</button>
+    <button class="btn" id="cNo" style="margin-top:9px">取消</button></div>`;
+  s.className='scrim show';
+  s.querySelector('.confirm-box').onclick=e=>e.stopPropagation();
+  $('#cNo').onclick=closeSheet; s.onclick=closeSheet;
+  $('#cYes').onclick=()=>onYes();
+}
+function openTripSwitcher(){
+  if(!state.trips.length){ openTripEditor(null); return; }
+  sheet('切換旅程',`<div id="swList"></div>
+    <button class="btn" id="swAdd" style="margin-top:11px">${ic('plus')}新增旅程</button>`);
+  $('#swList').innerHTML=state.trips.map(t=>{
+    const n=tripEntries(t.id).length;
+    return `<div class="trip-item${t.id===state.current?' cur':''}" data-id="${t.id}">
+      <span class="ti-cur">${t.country==='KR'?'KR':'JP'}</span>
+      <span class="ti-info"><span class="ti-name">${esc(t.name)}</span>
+      <span class="ti-meta">${tripRange(t)||'未設定日期'} · ${n} 筆</span></span>
+      ${t.id===state.current?ic('check'):''}
+    </div>`;
+  }).join('');
+  $('#swList').querySelectorAll('.trip-item').forEach(r=>r.onclick=()=>{
+    state.current=r.dataset.id; save('te_current',state.current);
+    closeSheet(); toast('已切換到 '+curTrip().name,'ok'); renderAll();
+  });
+  $('#swAdd').onclick=()=>openTripEditor(null);
+}
+
+/* ═══════════ 共用 ═══════════ */
+function emptyTrip(title,desc){
+  return `<div class="empty">
+    <div class="stamp">${ic('cam')}<b>TRAVEL</b></div>
+    <p><b style="color:var(--ink);font-size:16px">${esc(title)}</b><br>${esc(desc)}</p>
+    <button class="btn btn--solid">${ic('plus')}建立旅程</button>
+  </div>`;
+}
+function renderTopbar(){
+  const t=curTrip();
+  $('#tripName').textContent = t ? t.name : '尚無旅程';
+}
+function renderAll(){
+  renderTopbar();
+  renderCapture(); renderLedger(); renderSettings();
+}
+function switchPage(p){
+  state.page=p; save('te_page',p);
+  document.querySelectorAll('.page').forEach(s=>s.classList.toggle('show',s.id==='page-'+p));
+  document.querySelectorAll('.nav-i').forEach(n=>n.classList.toggle('on',n.dataset.page===p));
+  window.scrollTo(0,0);
+}
+
+/* ═══════════ 啟動 ═══════════ */
+document.querySelectorAll('.nav-i').forEach(n=>n.onclick=()=>switchPage(n.dataset.page));
+$('#tripBtn').onclick=openTripSwitcher;
+$('#fileCamera').onchange=e=>{ handleFile(e.target.files[0]); e.target.value=''; };
+$('#fileAlbum').onchange=e=>{ handleFile(e.target.files[0]); e.target.value=''; };
+$('#lightbox').onclick=()=>$('#lightbox').classList.remove('show');
+
+(function init(){
+  // 首次啟動：自動建立一趟旅程引導
+  if(state.trips.length && !state.current) state.current=state.trips[0].id;
+  renderAll();
+  switchPage(state.page||'capture');
+  // 進場抓即時匯率
+  fetchRates(true);
+})();
+</script>
+</body>
+</html>
